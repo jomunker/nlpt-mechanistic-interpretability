@@ -273,19 +273,18 @@ class GPT(nn.Module):
         x = self.transformer.drop(tok_emb + pos_emb)
 
         print("SEQ LENGTH:", t)
-        # create an empty tenser the size of the sequence length, count of layers and the embedding size
+        # create an empty dictionary to store the embeddings for each block
         if save_logits:
             self.logits_tensors = {}
 
         for block_idx, block in enumerate(self.transformer.h):
             x = block(x)
-            print("SHAPE", x.shape)
             if save_logits:
-                # append the embedding tensor for this block to the empty tensor
+                # append the embedding tensor for this block to the dictionary if it is the clean run
                 self.logits_tensors[f"layer_{block_idx}"] = x.detach().clone()
 
             if patch_config:
-                # patch the model with the embeddings from the clean run
+                # patch the model with the embeddings from the clean run if it is the corrupted run
                 i, j = patch_config
                 if block_idx == i:
                     x[:, j, :] = self.logits_tensors[f"layer_{block_idx}"][:, j, :]
