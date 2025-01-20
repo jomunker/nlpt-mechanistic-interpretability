@@ -141,6 +141,10 @@ class GPT(nn.Module):
                 'gpt-nano':     dict(n_layer=3, n_head=3, n_embd=48),
             }[config.model_type])
 
+        # list of embedding tensors
+        self.logits_tensors = None
+        self.last_token_logits = None
+
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
@@ -257,7 +261,7 @@ class GPT(nn.Module):
         optimizer = torch.optim.AdamW(optim_groups, lr=train_config.learning_rate, betas=train_config.betas)
         return optimizer
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, save_logits=False, patch_config=False):
         device = idx.device
         b, t = idx.size()
         assert t <= self.block_size, f"Cannot forward sequence of length {t}, block size is only {self.block_size}"
@@ -267,10 +271,30 @@ class GPT(nn.Module):
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (1, t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
-        for block in self.transformer.h:
+
+        print("SEQ LENGTH:", t)
+        # create an empty tenser the size of the sequence length, count of layers and the embedding size
+        if save_logits:
+            self.logits_tensors = {}
+
+        for block_idx, block in enumerate(self.transformer.h):
             x = block(x)
+            print("SHAPE", x.shape)
+            if save_logits:
+                # append the embedding tensor for this block to the empty tensor
+                self.logits_tensors[f"layer_{block_idx}"] = x.detach().clone()
+
+            if patch_config:
+                # patch the model with the embeddings from the clean run
+                i, j = patch_config
+                if block_idx == i:
+                    x[:, j, :] = self.logits_tensors[f"layer_{block_idx}"][:, j, :]
+
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x)
+
+        # update the last token logits
+        self.last_token_logits = logits[:, -1, :].detach().clone()
 
         # if we are given some desired targets also calculate the loss
         loss = None
@@ -280,17 +304,17 @@ class GPT(nn.Module):
         return logits, loss
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, do_sample=False, top_k=None):
+    def generate(self, idx, max_new_tokens, temperature=1.0, do_sample=False, top_k=None, save_logits=False, patch_config=None):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
-        for _ in range(max_new_tokens):
+        for token_idx in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.block_size else idx[:, -self.block_size:]
             # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
+            logits, _ = self(idx_cond, save_logits=save_logits, patch_config=patch_config)
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop the logits to only the top k options
@@ -307,4 +331,4 @@ class GPT(nn.Module):
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
 
-        return idx
+        return idx, self.last_token_logits
