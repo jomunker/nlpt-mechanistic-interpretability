@@ -261,7 +261,7 @@ class GPT(nn.Module):
         optimizer = torch.optim.AdamW(optim_groups, lr=train_config.learning_rate, betas=train_config.betas)
         return optimizer
 
-    def forward(self, idx, targets=None, save_logits=False, patch_config=False):
+    def forward(self, idx, targets=None, save_logits=False, patch_config=None):
         device = idx.device
         b, t = idx.size()
         assert t <= self.block_size, f"Cannot forward sequence of length {t}, block size is only {self.block_size}"
@@ -272,7 +272,6 @@ class GPT(nn.Module):
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (1, t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
 
-        print("SEQ LENGTH:", t)
         # create an empty dictionary to store the embeddings for each block
         if save_logits:
             self.logits_tensors = {}

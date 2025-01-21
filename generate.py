@@ -30,7 +30,7 @@ def get_next_most_likely_tokens(logits, top_k=20):
     return torch.topk(probs, top_k)
 
 
-def generate(prompt_clean='', prompt_corr='', num_samples=1, steps=1, do_sample=True):
+def generate(prompt_clean='', clean_expected_next='', prompt_corr='', corr_expected_next='', num_samples=1, steps=1, do_sample=True, output_name="heatmap"):
     # tokenize the input prompt into integer input sequence
 
     tokenizer = BPETokenizer()
@@ -47,48 +47,54 @@ def generate(prompt_clean='', prompt_corr='', num_samples=1, steps=1, do_sample=
     # we'll process all desired num_samples in a batch, so expand out the batch dim
     clean = clean.expand(num_samples, -1)
 
-    print("CLEAN", clean.size())
     # clean run
-    y, last_token_logits = model.generate(clean, max_new_tokens=steps, do_sample=do_sample, top_k=40, save_logits=True, patch_config=None)
+    y, last_token_logits = model.generate(clean, max_new_tokens=steps, do_sample=do_sample, top_k=15, save_logits=True, patch_config=None)
 
-    print("CORR", corr.size())
-    print(last_token_logits.size())
-    print(last_token_logits.shape)
+    clean_expected_index = tokenizer(' ' + clean_expected_next).to(device)[0]
+    clean_expected_prob = last_token_logits[0][clean_expected_index].item()
 
     # initialize a difference matrix to hold the differences of the last logits between clean and corrupted runs
     logits_diff = torch.zeros((12, clean.size()[1]))
+
     # corrupted run
     for i in range(12):
         # iterate over all tokens in the input sequence
         for j in range(clean.size()[1]):
-            _, last_token_logits_corr = model.generate(corr, max_new_tokens=steps, do_sample=do_sample, top_k=40, save_logits=False, patch_config=(i, j))
-            logits_diff[i][j] = torch.sum(torch.abs(last_token_logits_corr - last_token_logits))
+            _, last_token_logits_corr = model.generate(corr, max_new_tokens=steps, do_sample=do_sample, top_k=15, save_logits=False, patch_config=(i, j))
+            corr_expected_index = tokenizer(' ' + corr_expected_next).to(device)[0]
+            corr_expected_prob = last_token_logits_corr[0][corr_expected_index].item()
+            logits_diff[i][j] = corr_expected_prob - clean_expected_prob
 
-    for i in range(num_samples):
-        out = tokenizer.decode(y[i].cpu().squeeze())
-        print('-' * 80)
-        print(out)
 
-    # print the top 20 most likely tokens for each position in the sequence
     probs, indices = get_next_most_likely_tokens(last_token_logits, top_k=20)
 
     # decode the tokens and print them with their probabilities
-    for prob, idx in zip(probs[0], indices[0]):
+    print("CLEAN - MOST LIKELY TOKENS")
+    for id, (prob, idx) in enumerate(zip(probs[0], indices[0])):
         idx_tensor = torch.tensor([idx.item()])
         token = tokenizer.decode(idx_tensor)
-        print(f"Token: {token}, Probability: {prob.item()}")
+        print(f"{id + 1}. Token Index: {idx.item()}, Token: {token}, Probability: {prob.item()}")
 
-    # convert clean input sequence to tokens
-    tokens = tokenizer.decode(clean[0])
-    tokens = tokens.split()
+    _, last_token_logits_corr = model.generate(corr, max_new_tokens=steps, do_sample=do_sample, top_k=15, save_logits=False)
+    probs_corr, indices_corr = get_next_most_likely_tokens(last_token_logits_corr, top_k=20)
+
+    # decode the tokens and print them with their probabilities
+    print("CORRUPTED - MOST LIKELY TOKENS")
+    for id, (prob, idx) in enumerate(zip(probs_corr[0], indices_corr[0])):
+        idx_tensor = torch.tensor([idx.item()])
+        token = tokenizer.decode(idx_tensor)
+        print(f"{id + 1}. Token Index: {idx.item()}, Token: {token}, Probability: {prob.item()}")
+
+    # decode input tokens
+    input_tokens = [tokenizer.decode(torch.tensor([token])) for token in clean.squeeze().tolist()]
 
     # Visualize results with token labels
     plt.figure(figsize=(30, 16))
-    sns.heatmap(logits_diff, cmap='crest', annot=True, xticklabels=tokens)
+    sns.heatmap(logits_diff, cmap='coolwarm', annot=True, fmt=".2f", xticklabels=input_tokens, yticklabels=[f'Layer {i}' for i in range(12)])
     plt.xticks(rotation=45, ha='right')
     plt.xlabel('Token')
     plt.ylabel('Layer')
     plt.title("Activation Patching Heatmap")
     plt.tight_layout()
-    plt.savefig(f'heatmap_{model_type}.png')
+    plt.savefig(f'{output_name}.png')
     plt.close()
