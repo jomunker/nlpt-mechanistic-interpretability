@@ -142,7 +142,7 @@ class GPT(nn.Module):
             }[config.model_type])
 
         # list of embedding tensors
-        self.logits_tensors = None
+        self.activations_dict = None
         self.last_token_logits = None
 
         self.transformer = nn.ModuleDict(dict(
@@ -261,7 +261,7 @@ class GPT(nn.Module):
         optimizer = torch.optim.AdamW(optim_groups, lr=train_config.learning_rate, betas=train_config.betas)
         return optimizer
 
-    def forward(self, idx, targets=None, save_logits=False, patch_config=None):
+    def forward(self, idx, targets=None, save_activations=False, patch_config=None):
         device = idx.device
         b, t = idx.size()
         assert t <= self.block_size, f"Cannot forward sequence of length {t}, block size is only {self.block_size}"
@@ -273,20 +273,20 @@ class GPT(nn.Module):
         x = self.transformer.drop(tok_emb + pos_emb)
 
         # create an empty dictionary to store the embeddings for each block
-        if save_logits:
-            self.logits_tensors = {}
+        if save_activations:
+            self.activations_dict = {}
 
         for block_idx, block in enumerate(self.transformer.h):
             x = block(x)
-            if save_logits:
-                # append the embedding tensor for this block to the dictionary if it is the clean run
-                self.logits_tensors[f"layer_{block_idx}"] = x.detach().clone()
+            if save_activations:
+                # append the activation tensor for this block to the dictionary if it is the clean run
+                self.activations_dict[f"layer_{block_idx}"] = x.detach().clone()
 
             if patch_config:
-                # patch the model with the embeddings from the clean run if it is the corrupted run
+                # patch the model with the activations from the clean run if it is the corrupted run
                 i, j = patch_config
                 if block_idx == i:
-                    x[:, j, :] = self.logits_tensors[f"layer_{block_idx}"][:, j, :]
+                    x[:, j, :] = self.activations_dict[f"layer_{block_idx}"][:, j, :]
 
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x)
@@ -302,7 +302,7 @@ class GPT(nn.Module):
         return logits, loss
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, do_sample=False, top_k=None, save_logits=False, patch_config=None):
+    def generate(self, idx, max_new_tokens, temperature=1.0, do_sample=False, top_k=None, save_activations=False, patch_config=None):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
@@ -312,7 +312,7 @@ class GPT(nn.Module):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.block_size else idx[:, -self.block_size:]
             # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond, save_logits=save_logits, patch_config=patch_config)
+            logits, _ = self(idx_cond, save_activations=save_activations, patch_config=patch_config)
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop the logits to only the top k options

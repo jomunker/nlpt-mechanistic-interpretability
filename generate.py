@@ -19,15 +19,30 @@ else:
     model = GPT2LMHeadModel.from_pretrained(model_type)
     model.config.pad_token_id = model.config.eos_token_id  # suppress a warning
 
-# ship model to device and set to eval mode
+# ship model to the device and set to eval mode
 model.to(device)
 model.eval()
+layer_count = len(model.transformer.h)
 
 
 def get_next_most_likely_tokens(logits, top_k=20):
     probs = F.softmax(logits, dim=-1)
 
     return torch.topk(probs, top_k)
+
+
+def get_token_probability(expected_next_token, last_token_logits, tokenizer):
+    idx = tokenizer(' ' + expected_next_token).to(device)[0]
+    prob = last_token_logits[0][idx].item()
+    return prob
+
+
+def print_next_token_probs(last_token_logits, tokenizer, top_k=20):
+    probs, indices = get_next_most_likely_tokens(last_token_logits, top_k=top_k)
+    for id, (prob, idx) in enumerate(zip(probs[0], indices[0])):
+        idx_tensor = torch.tensor([idx.item()])
+        token = tokenizer.decode(idx_tensor)
+        print(f"{id + 1}. Token Index: {idx.item()}, Token: {token}, Probability: {prob.item()}")
 
 
 def generate(prompt_clean='', clean_expected_next='', prompt_corr='', corr_expected_next='', num_samples=1, steps=1, do_sample=True, output_name="heatmap"):
@@ -47,50 +62,31 @@ def generate(prompt_clean='', clean_expected_next='', prompt_corr='', corr_expec
     # we'll process all desired num_samples in a batch, so expand out the batch dim
     clean = clean.expand(num_samples, -1)
 
-    # clean run
-    y, last_token_logits = model.generate(clean, max_new_tokens=steps, do_sample=do_sample, top_k=15, save_logits=True, patch_config=None)
+    # CLEAN RUN
+    y, last_token_logits = model.generate(clean, max_new_tokens=steps, do_sample=do_sample, top_k=15, save_activations=True, patch_config=None)
+    clean_expected_token_prob = get_token_probability(clean_expected_next, last_token_logits, tokenizer)
 
-    clean_expected_index = tokenizer(' ' + clean_expected_next).to(device)[0]
-    clean_expected_prob = last_token_logits[0][clean_expected_index].item()
+    # decode the next most likely tokens for the clean run and print them with their probabilities
+    print("CLEAN - MOST LIKELY TOKENS")
+    print_next_token_probs(last_token_logits, tokenizer)
 
-    # initialize a difference matrix to hold the differences of the last logits between clean and corrupted runs
-    logits_diff = torch.zeros((12, clean.size()[1]))
+    # initialize a difference matrix to hold the differences of the next expected token probabilities
+    probs_diff = torch.zeros((layer_count, clean.size()[1]))
 
-    # corrupted run
-    for i in range(12):
+    # corrupted run with activation patching
+    for i in range(layer_count):
         # iterate over all tokens in the input sequence
         for j in range(clean.size()[1]):
-            _, last_token_logits_corr = model.generate(corr, max_new_tokens=steps, do_sample=do_sample, top_k=15, save_logits=False, patch_config=(i, j))
-            corr_expected_index = tokenizer(' ' + corr_expected_next).to(device)[0]
-            corr_expected_prob = last_token_logits_corr[0][corr_expected_index].item()
-            logits_diff[i][j] = corr_expected_prob - clean_expected_prob
+            _, last_token_logits_corr = model.generate(corr, max_new_tokens=steps, do_sample=do_sample, top_k=15, save_activations=False, patch_config=(i, j))
+            corr_expected_token_prob = get_token_probability(corr_expected_next, last_token_logits_corr, tokenizer)
+            probs_diff[i][j] = corr_expected_token_prob - clean_expected_token_prob
 
-
-    probs, indices = get_next_most_likely_tokens(last_token_logits, top_k=20)
-
-    # decode the tokens and print them with their probabilities
-    print("CLEAN - MOST LIKELY TOKENS")
-    for id, (prob, idx) in enumerate(zip(probs[0], indices[0])):
-        idx_tensor = torch.tensor([idx.item()])
-        token = tokenizer.decode(idx_tensor)
-        print(f"{id + 1}. Token Index: {idx.item()}, Token: {token}, Probability: {prob.item()}")
-
-    _, last_token_logits_corr = model.generate(corr, max_new_tokens=steps, do_sample=do_sample, top_k=15, save_logits=False)
-    probs_corr, indices_corr = get_next_most_likely_tokens(last_token_logits_corr, top_k=20)
-
-    # decode the tokens and print them with their probabilities
-    print("CORRUPTED - MOST LIKELY TOKENS")
-    for id, (prob, idx) in enumerate(zip(probs_corr[0], indices_corr[0])):
-        idx_tensor = torch.tensor([idx.item()])
-        token = tokenizer.decode(idx_tensor)
-        print(f"{id + 1}. Token Index: {idx.item()}, Token: {token}, Probability: {prob.item()}")
-
-    # decode input tokens
+    # decode input tokens to strings
     input_tokens = [tokenizer.decode(torch.tensor([token])) for token in clean.squeeze().tolist()]
 
     # Visualize results with token labels
     plt.figure(figsize=(30, 16))
-    sns.heatmap(logits_diff, cmap='coolwarm', annot=True, fmt=".2f", xticklabels=input_tokens, yticklabels=[f'Layer {i}' for i in range(12)])
+    sns.heatmap(probs_diff, cmap='coolwarm', annot=True, fmt=".2f", xticklabels=input_tokens, yticklabels=[f'Layer {i}' for i in range(12)])
     plt.xticks(rotation=45, ha='right')
     plt.xlabel('Token')
     plt.ylabel('Layer')
@@ -98,3 +94,10 @@ def generate(prompt_clean='', clean_expected_next='', prompt_corr='', corr_expec
     plt.tight_layout()
     plt.savefig(f'{output_name}.png')
     plt.close()
+
+    # CORRUPTED RUN
+    _, last_token_logits_corr = model.generate(corr, max_new_tokens=steps, do_sample=do_sample, top_k=15, save_activations=False)
+
+    # decode the next most likely tokens for the corrupted run and print them with their probabilities
+    print("CORRUPTED - MOST LIKELY TOKENS")
+    print_next_token_probs(last_token_logits_corr, tokenizer)
