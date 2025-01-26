@@ -92,7 +92,7 @@ def generate(prompt_clean='', clean_expected_next='', prompt_corr='', corr_expec
     plt.ylabel('Layer')
     plt.title("Activation Patching Heatmap")
     plt.tight_layout()
-    plt.savefig(f'{output_name}.png')
+    plt.savefig(f'./heatmaps/{output_name}.png')
     plt.close()
 
     # CORRUPTED RUN
